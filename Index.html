@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Garage Door</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #121212;
+      color: #f3f4f6;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+    }
+    #mainBtn {
+      width: 230px;
+      height: 230px;
+      border-radius: 50%;
+      border: none;
+      background: #2563eb;
+      color: white;
+      font-size: 1.5rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 10px 25px rgba(37, 99, 235, 0.4);
+      transition: transform 0.1s, background 0.15s;
+    }
+    #mainBtn:active { transform: scale(0.95); background: #1d4ed8; }
+    #mainBtn:disabled { background: #374151; box-shadow: none; cursor: not-allowed; }
+    #status {
+      margin-top: 22px;
+      color: #9ca3af;
+      font-size: 1rem;
+      min-height: 1.4em;
+      text-align: center;
+    }
+    #toggleSettings {
+      margin-top: 32px;
+      background: none;
+      border: 1px solid #374151;
+      color: #9ca3af;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    #settingsPanel {
+      display: none;
+      width: 100%;
+      max-width: 360px;
+      margin-top: 16px;
+      background: #1f2937;
+      padding: 16px;
+      border-radius: 12px;
+      border: 1px solid #374151;
+    }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: #9ca3af;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+    label:first-child { margin-top: 0; }
+    input {
+      width: 100%;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #4b5563;
+      background: #111827;
+      color: #fff;
+      font-family: monospace;
+      font-size: 0.9rem;
+    }
+    #saveBtn {
+      width: 100%;
+      margin-top: 16px;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      background: #10b981;
+      color: #064e3b;
+      font-weight: 700;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <button id="mainBtn" onclick="triggerGarage()">Open / Close</button>
+  <div id="status">Configure device below to begin</div>
+
+  <button id="toggleSettings" onclick="toggleSettings()">⚙️ Device Settings</button>
+
+  <div id="settingsPanel">
+    <label for="devName">BLE Device Name</label>
+    <input id="devName" type="text" placeholder="e.g. GarageRelay-C6" />
+
+    <label for="serviceUuid">Service UUID</label>
+    <input id="serviceUuid" type="text" placeholder="0000ffe0-0000-1000-8000-00805f9b34fb" />
+
+    <label for="charUuid">Write Characteristic UUID</label>
+    <input id="charUuid" type="text" placeholder="0000ffe1-0000-1000-8000-00805f9b34fb" />
+
+    <label for="hexCmd">Hex Pulse Command</label>
+    <input id="hexCmd" type="text" placeholder="A00103A4" />
+
+    <button id="saveBtn" onclick="saveSettings()">Save to Device</button>
+  </div>
+
+  <script>
+    const STORAGE_KEY = 'garage_ble_config_v1';
+    let cachedDevice = null;
+
+    function getConfig() {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || null;
+      } catch {
+        return null;
+      }
+    }
+
+    function loadSettingsUI() {
+      const cfg = getConfig();
+      const panel = document.getElementById('settingsPanel');
+      const status = document.getElementById('status');
+
+      if (cfg && cfg.devName && cfg.serviceUuid && cfg.charUuid && cfg.hexCmd) {
+        document.getElementById('devName').value = cfg.devName;
+        document.getElementById('serviceUuid').value = cfg.serviceUuid;
+        document.getElementById('charUuid').value = cfg.charUuid;
+        document.getElementById('hexCmd').value = cfg.hexCmd;
+        status.textContent = `Ready (${cfg.devName})`;
+      } else {
+        // Pre-fill standard UUID placeholders for convenience without saving yet
+        document.getElementById('serviceUuid').value = '0000ffe0-0000-1000-8000-00805f9b34fb';
+        document.getElementById('charUuid').value = '0000ffe1-0000-1000-8000-00805f9b34fb';
+        panel.style.display = 'block';
+      }
+    }
+
+    function toggleSettings() {
+      const panel = document.getElementById('settingsPanel');
+      panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+    }
+
+    function saveSettings() {
+      const cfg = {
+        devName: document.getElementById('devName').value.trim(),
+        serviceUuid: document.getElementById('serviceUuid').value.trim().toLowerCase(),
+        charUuid: document.getElementById('charUuid').value.trim().toLowerCase(),
+        hexCmd: document.getElementById('hexCmd').value.replace(/\s+/g, '')
+      };
+
+      if (!cfg.devName || !cfg.serviceUuid || !cfg.charUuid || !cfg.hexCmd) {
+        document.getElementById('status').textContent = 'Please fill in all fields';
+        return;
+      }
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+      cachedDevice = null;
+      document.getElementById('settingsPanel').style.display = 'none';
+      document.getElementById('status').textContent = `Saved (${cfg.devName})`;
+    }
+
+    function hexToBytes(hex) {
+      const clean = hex.replace(/[^0-9a-fA-F]/g, '');
+      const bytes = new Uint8Array(clean.length / 2);
+      for (let i = 0; i < clean.length; i += 2) {
+        bytes[i / 2] = parseInt(clean.substr(i, 2), 16);
+      }
+      return bytes;
+    }
+
+    async function triggerGarage() {
+      const status = document.getElementById('status');
+      const cfg = getConfig();
+
+      if (!cfg) {
+        status.textContent = 'Enter and save your device settings first';
+        document.getElementById('settingsPanel').style.display = 'block';
+        return;
+      }
+
+      try {
+        status.textContent = 'Connecting...';
+        if (!cachedDevice) {
+          cachedDevice = await navigator.bluetooth.requestDevice({
+            filters: [{ name: cfg.devName }],
+            optionalServices: [cfg.serviceUuid]
+          });
+        }
+
+        const server = await cachedDevice.gatt.connect();
+        const service = await server.getPrimaryService(cfg.serviceUuid);
+        const char = await service.getCharacteristic(cfg.charUuid);
+
+        await char.writeValueWithoutResponse(hexToBytes(cfg.hexCmd));
+        status.textContent = 'Triggered!';
+
+        setTimeout(() => {
+          if (cachedDevice.gatt.connected) cachedDevice.gatt.disconnect();
+          status.textContent = `Ready (${cfg.devName})`;
+        }, 500);
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+        cachedDevice = null;
+      }
+    }
+
+    loadSettingsUI();
+  </script>
+</body>
+</html>
