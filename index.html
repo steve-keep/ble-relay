@@ -118,6 +118,7 @@
   <script>
     const STORAGE_KEY = 'garage_ble_config_v1';
     let cachedDevice = null;
+    let isBusy = false;
 
     function getConfig() {
       try {
@@ -139,7 +140,6 @@
         document.getElementById('hexCmd').value = cfg.hexCmd;
         status.textContent = `Ready (${cfg.devName})`;
       } else {
-        // Pre-fill standard UUID placeholders for convenience without saving yet
         document.getElementById('serviceUuid').value = '0000ffe0-0000-1000-8000-00805f9b34fb';
         document.getElementById('charUuid').value = '0000ffe1-0000-1000-8000-00805f9b34fb';
         panel.style.display = 'block';
@@ -179,8 +179,13 @@
       return bytes;
     }
 
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
     async function triggerGarage() {
+      if (isBusy) return;
+
       const status = document.getElementById('status');
+      const btn = document.getElementById('mainBtn');
       const cfg = getConfig();
 
       if (!cfg) {
@@ -188,6 +193,9 @@
         document.getElementById('settingsPanel').style.display = 'block';
         return;
       }
+
+      isBusy = true;
+      btn.disabled = true;
 
       try {
         status.textContent = 'Connecting...';
@@ -198,20 +206,33 @@
           });
         }
 
-        const server = await cachedDevice.gatt.connect();
-        const service = await server.getPrimaryService(cfg.serviceUuid);
+        if (!cachedDevice.gatt.connected) {
+          await cachedDevice.gatt.connect();
+        }
+
+        const service = await cachedDevice.gatt.getPrimaryService(cfg.serviceUuid);
         const char = await service.getCharacteristic(cfg.charUuid);
 
-        await char.writeValueWithoutResponse(hexToBytes(cfg.hexCmd));
+        status.textContent = 'Sending pulse...';
+        await char.writeValueWithResponse(hexToBytes(cfg.hexCmd));
         status.textContent = 'Triggered!';
 
-        setTimeout(() => {
-          if (cachedDevice.gatt.connected) cachedDevice.gatt.disconnect();
-          status.textContent = `Ready (${cfg.devName})`;
-        }, 500);
+        // Wait 800ms so the ESP32-C6 finishes its 600ms relay pulse before disconnecting
+        await sleep(800);
+
+        if (cachedDevice.gatt.connected) {
+          cachedDevice.gatt.disconnect();
+        }
+        status.textContent = `Ready (${cfg.devName})`;
       } catch (err) {
         status.textContent = 'Error: ' + err.message;
+        if (cachedDevice && cachedDevice.gatt.connected) {
+          cachedDevice.gatt.disconnect();
+        }
         cachedDevice = null;
+      } finally {
+        isBusy = false;
+        btn.disabled = false;
       }
     }
 
