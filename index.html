@@ -118,6 +118,8 @@
   <script>
     const STORAGE_KEY = 'garage_ble_config_v1';
     let cachedDevice = null;
+    let cachedChar = null;
+    let disconnectTimer = null;
     let isBusy = false;
 
     function getConfig() {
@@ -165,9 +167,28 @@
       }
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-      cachedDevice = null;
+      resetBleState();
       document.getElementById('settingsPanel').style.display = 'none';
       document.getElementById('status').textContent = `Saved (${cfg.devName})`;
+    }
+
+    function resetBleState() {
+      clearTimeout(disconnectTimer);
+      cachedChar = null;
+      if (cachedDevice && cachedDevice.gatt && cachedDevice.gatt.connected) {
+        cachedDevice.gatt.disconnect();
+      }
+    }
+
+    function scheduleIdleDisconnect(devName) {
+      clearTimeout(disconnectTimer);
+      disconnectTimer = setTimeout(() => {
+        cachedChar = null;
+        if (cachedDevice && cachedDevice.gatt && cachedDevice.gatt.connected) {
+          cachedDevice.gatt.disconnect();
+        }
+        document.getElementById('status').textContent = `Ready (${devName})`;
+      }, 15000);
     }
 
     function hexToBytes(hex) {
@@ -179,7 +200,12 @@
       return bytes;
     }
 
-    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    function withTimeout(promise, ms, msg) {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(msg)), ms))
+      ]);
+    }
 
     async function triggerGarage() {
       if (isBusy) return;
@@ -196,45 +222,71 @@
 
       isBusy = true;
       btn.disabled = true;
+      clearTimeout(disconnectTimer);
 
       try {
-        status.textContent = 'Connecting...';
         if (!cachedDevice) {
+          status.textContent = 'Select device...';
           cachedDevice = await navigator.bluetooth.requestDevice({
             filters: [{ name: cfg.devName }],
             optionalServices: [cfg.serviceUuid]
           });
+          cachedDevice.addEventListener('gattserverdisconnected', () => {
+            cachedChar = null;
+            if (!isBusy) {
+              status.textContent = `Ready (${cfg.devName})`;
+            }
+          });
         }
 
-        if (!cachedDevice.gatt.connected) {
-          await cachedDevice.gatt.connect();
+        if (!cachedDevice.gatt.connected || !cachedChar) {
+          status.textContent = 'Connecting...';
+          await withTimeout(cachedDevice.gatt.connect(), 5000, 'Connection timed out');
+          const service = await withTimeout(
+            cachedDevice.gatt.getPrimaryService(cfg.serviceUuid),
+            4000,
+            'Service lookup timed out'
+          );
+          cachedChar = await withTimeout(
+            service.getCharacteristic(cfg.charUuid),
+            4000,
+            'Characteristic lookup timed out'
+          );
         }
-
-        const service = await cachedDevice.gatt.getPrimaryService(cfg.serviceUuid);
-        const char = await service.getCharacteristic(cfg.charUuid);
 
         status.textContent = 'Sending pulse...';
-        await char.writeValueWithResponse(hexToBytes(cfg.hexCmd));
+        await withTimeout(
+          cachedChar.writeValueWithoutResponse(hexToBytes(cfg.hexCmd)),
+          3000,
+          'Write timed out'
+        );
+
         status.textContent = 'Triggered!';
+        setTimeout(() => {
+          if (cachedDevice && cachedDevice.gatt.connected) {
+            status.textContent = `Connected (${cfg.devName})`;
+          }
+        }, 800);
 
-        // Wait 800ms so the ESP32-C6 finishes its 600ms relay pulse before disconnecting
-        await sleep(800);
-
-        if (cachedDevice.gatt.connected) {
-          cachedDevice.gatt.disconnect();
-        }
-        status.textContent = `Ready (${cfg.devName})`;
+        scheduleIdleDisconnect(cfg.devName);
       } catch (err) {
         status.textContent = 'Error: ' + err.message;
-        if (cachedDevice && cachedDevice.gatt.connected) {
-          cachedDevice.gatt.disconnect();
-        }
+        resetBleState();
         cachedDevice = null;
       } finally {
         isBusy = false;
         btn.disabled = false;
       }
     }
+
+    // Release BLE connection immediately if user switches apps or locks phone
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        const cfg = getConfig();
+        resetBleState();
+        if (cfg) document.getElementById('status').textContent = `Ready (${cfg.devName})`;
+      }
+    });
 
     loadSettingsUI();
   </script>
